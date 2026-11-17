@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -16,6 +17,23 @@ class PackageIdentity:
     @property
     def key(self) -> str:
         return f"{self.ecosystem}:{self.name}"
+
+
+_PYPI_NAME_SEPARATORS = re.compile(r"[-_.]+")
+
+
+def match_key(package: PackageIdentity) -> tuple[str, str]:
+    """Identity used to match OSV packages against installed packages.
+
+    Ecosystem names are compared case-insensitively. PyPI project names are
+    normalized as defined by PEP 503 (``Django`` == ``django``,
+    ``PyYAML`` == ``pyyaml``, ``zope_interface`` == ``zope.interface``).
+    """
+    ecosystem = package.ecosystem.strip().lower()
+    name = package.name.strip()
+    if ecosystem == "pypi":
+        name = _PYPI_NAME_SEPARATORS.sub("-", name).lower()
+    return ecosystem, name
 
 
 @dataclass(frozen=True)
@@ -56,6 +74,7 @@ class RemediationCandidate:
     source: str
     applicability: Applicability
     unresolved_issues: tuple[str, ...] = ()
+    installed_version: str | None = None
 
 
 @dataclass(frozen=True)

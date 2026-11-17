@@ -40,6 +40,10 @@ class Project(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    # Set when the user deletes it. Deleted rows stay so saved plans keep
+    # their history (every foreign key is RESTRICT), but they are hidden
+    # everywhere and excluded from new analyses.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("name", name="uq_projects_name"),)
 
 
@@ -49,6 +53,10 @@ class Environment(TimestampMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    # Set when the user deletes it. Deleted rows stay so saved plans keep
+    # their history (every foreign key is RESTRICT), but they are hidden
+    # everywhere and excluded from new analyses.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("project_id", "id", name="uq_environments_project_id_id"),
                       UniqueConstraint("project_id", "name", name="uq_environments_project_name"))
 
@@ -61,6 +69,10 @@ class Asset(TimestampMixin, Base):
     external_identifier: Mapped[str | None] = mapped_column(String(255))
     operating_system: Mapped[str | None] = mapped_column(String(120))
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON_TYPE, default=dict, nullable=False)
+    # Set when the user deletes it. Deleted rows stay so saved plans keep
+    # their history (every foreign key is RESTRICT), but they are hidden
+    # everywhere and excluded from new analyses.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("environment_id", "name", name="uq_assets_environment_name"),
                       Index("ix_assets_external_identifier", "external_identifier"))
 
@@ -87,7 +99,10 @@ class InstalledPackage(TimestampMixin, Base):
 
 
 class PackageDependency(Base):
+    """``dependent -> prerequisite`` edge, scoped to one environment so a test
+    graph in one workspace cannot block patches in another."""
     __tablename__ = "package_dependencies"
+    environment_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("environments.id", ondelete="RESTRICT"), primary_key=True)
     dependent_package_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("packages.id", ondelete="RESTRICT"), primary_key=True)
     prerequisite_package_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("packages.id", ondelete="RESTRICT"), primary_key=True)
     source: Mapped[str | None] = mapped_column(String(120))

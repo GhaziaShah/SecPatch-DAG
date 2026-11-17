@@ -50,6 +50,24 @@ Prerequisite-aware schedule and validation
 Persisted plan, history, and exports
 ```
 
+
+## Algorithms and paradigms
+
+| Stage | Algorithm | Paradigm | Complexity | Code |
+|---|---|---|---|---|
+| Patch selection (fast) | Benefit/duration ratio, then keep the better of that plan and the best single fix: a ½-approximation (≥ half the optimum) for plain knapsack | Greedy + approximation | O(n log n) | `core/optimization.py` `greedy_optimize` |
+| Patch selection (exact) | 0/1 knapsack `dp[i][c] = max(dp[i-1][c], dp[i-1][c-d_i] + b_i)`; tree knapsack when prerequisites form a forest | Dynamic programming | O(n·W); O(n·W²) for trees | `core/optimization.py` `dp_optimize` |
+| Patch selection (reference) | Precedence-constrained knapsack model solved by OR-Tools CP-SAT | Constraint solver (independent check) | exponential worst case, time-limited | `core/optimization.py` `cp_sat_optimize` |
+| Cycle detection | Tarjan strongly connected components | Graph DFS | O(V+E) | `core/graph.py` |
+| Safe patch order | Kahn topological sort on the SCC condensation | Graph BFS | O(V+E) | `core/graph.py` |
+| Execution order | Smith's ratio rule (priority/duration) over ready actions | Greedy | O(n²) | `core/scheduling.py` |
+
+Dynamic programming is exact but pseudo-polynomial (its tables grow with the
+window length in minutes). For general prerequisite graphs (an action with two
+or more prerequisites) the problem is strongly NP-hard; the DP then reports
+`NOT_APPLICABLE` and CP-SAT is used. `tests/test_dynamic_programming.py`
+checks the DP against brute force and CP-SAT on random instances.
+
 ## What the algorithms do
 
 ### Tarjan strongly connected components
@@ -221,13 +239,32 @@ pip install -r requirements.txt
 ```
 
 Copy `.env.example` to `.env` and set a local PostgreSQL connection string.
-`.env` is ignored and must never be committed.
+`.env` is ignored and must never be committed. The API, Alembic and the
+PostgreSQL tests all read `DATABASE_URL` from this file automatically; a real
+environment variable with the same name takes precedence.
 
 Apply migrations:
 
 ```powershell
 .\.venv\Scripts\alembic.exe upgrade head
 ```
+
+Run this again after pulling changes that add a migration (for example
+`0002`, which adds delete support and per-environment dependencies).
+
+### Package dependencies
+
+On the **Dependency graph** tab, after importing the inventory, use
+**Import dependencies** with a file like:
+
+```json
+{"dependencies": [{"from": "PyPI:requests", "to": "PyPI:urllib3"}]}
+```
+
+`from` depends on `to`, so `to` is patched first. Keys are `ecosystem:name` as
+shown in the inventory. Each import replaces the environment's edges. Packages
+in a cycle (a strongly connected component found by Tarjan's algorithm) are
+blocked from the plan. See `diagnostic_datasets/datasets/baseline/dependencies*.json`.
 
 Start the API:
 
@@ -311,9 +348,9 @@ cd frontend
 npm run build
 ```
 
-Current verification baseline:
+Current verification baseline (see `QA_REPORT.md`):
 
-- Full Python suite: 64 passed
+- Full Python suite: 102 passed
 - PostgreSQL integration/API suite: 6 passed
 - Frontend production build: passed
 - Supplied baseline diagnostic dataset: 10 inventory rows, 6 vulnerability
@@ -342,6 +379,10 @@ The main persisted endpoints are:
 - `POST /api/v1/persisted-plans`
 - `GET /api/v1/projects/{project_id}/analysis-runs`
 - `GET /api/v1/analysis-runs/{run_id}`
+- `GET /api/v1/environments/{environment_id}/candidates`
+
+`POST /api/v1/persisted-plans` responses include `estimate_review`, listing
+which estimate keys were applied and why any were ignored.
 
 PostgreSQL stores projects, environments, assets, packages, installed
 inventory, vulnerabilities, remediation candidates, analysis runs, patch
@@ -355,9 +396,9 @@ snapshots preserve historical input and result evidence.
   of scope.
 - Dependency-edge creation is currently an internal/database workflow rather
   than a complete user-facing import flow.
-- Estimate files are supported by the headless ingestion CLI; the dashboard
-  currently provides estimate controls rather than a separate estimate-file
-  upload screen.
+- Estimate files are supported by the headless ingestion CLI and by the
+  dashboard's Optimization page ("Estimates file" upload); without a file the
+  dashboard applies one manual estimate to every actionable candidate.
 - The product proposes remediation plans; it does not install patches.
 
 ## License

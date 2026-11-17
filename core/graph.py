@@ -48,41 +48,61 @@ def analyze_graph(nodes: tuple[str, ...], dependencies: tuple[tuple[str, str], .
     components: list[list[str]] = []
     trace: list[dict[str, object]] = []
 
-    def visit(node: str) -> None:
+    def visit(root: str) -> None:
+        # Iterative Tarjan: same discovery/lowlink/component order as the
+        # recursive form, but long dependency chains cannot exhaust Python's
+        # recursion limit.
         nonlocal index
-        indices[node] = index
-        lowlink[node] = index
-        index += 1
-        stack.append(node)
-        on_stack.add(node)
-        trace.append({"algorithm": "tarjan", "event": "discover", "node": node, "index": indices[node]})
-        for neighbor in adjacency[node]:
-            if neighbor not in indices:
-                visit(neighbor)
-                lowlink[node] = min(lowlink[node], lowlink[neighbor])
-                trace.append({"algorithm": "tarjan", "event": "lowlink_update", "node": node, "value": lowlink[node]})
-            elif neighbor in on_stack:
-                lowlink[node] = min(lowlink[node], indices[neighbor])
-        if lowlink[node] == indices[node]:
-            component: list[str] = []
-            while True:
-                member = stack.pop()
-                on_stack.remove(member)
-                component.append(member)
-                if member == node:
-                    break
-            component.sort()
-            components.append(component)
-            trace.append({"algorithm": "tarjan", "event": "component", "nodes": component})
+
+        def discover(node: str) -> None:
+            nonlocal index
+            indices[node] = index
+            lowlink[node] = index
+            index += 1
+            stack.append(node)
+            on_stack.add(node)
+            trace.append({"algorithm": "tarjan", "event": "discover", "node": node, "index": indices[node]})
+
+        discover(root)
+        work: list[tuple[str, int]] = [(root, 0)]
+        while work:
+            node, position = work[-1]
+            neighbors = adjacency[node]
+            if position < len(neighbors):
+                work[-1] = (node, position + 1)
+                neighbor = neighbors[position]
+                if neighbor not in indices:
+                    discover(neighbor)
+                    work.append((neighbor, 0))
+                elif neighbor in on_stack:
+                    lowlink[node] = min(lowlink[node], indices[neighbor])
+                continue
+            work.pop()
+            if lowlink[node] == indices[node]:
+                component: list[str] = []
+                while True:
+                    member = stack.pop()
+                    on_stack.remove(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                component.sort()
+                components.append(component)
+                trace.append({"algorithm": "tarjan", "event": "component", "nodes": component})
+            if work:
+                parent = work[-1][0]
+                lowlink[parent] = min(lowlink[parent], lowlink[node])
+                trace.append({"algorithm": "tarjan", "event": "lowlink_update", "node": parent, "value": lowlink[parent]})
 
     for node in sorted(nodes):
         if node not in indices:
             visit(node)
 
     component_of = {node: position for position, component in enumerate(components) for node in component}
+    self_loops = {source for source, target in dependencies if source == target}
     cyclic_components = [
         component for component in components
-        if len(component) > 1 or any(source == target == component[0] for source, target in dependencies)
+        if len(component) > 1 or component[0] in self_loops
     ]
     condensation: set[tuple[int, int]] = set()
     for source, target in dependencies:
