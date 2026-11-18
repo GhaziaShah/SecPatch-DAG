@@ -357,6 +357,7 @@ npm run build
 ```
 
 Verification on 18 November 2026: 140 Python tests passed with PostgreSQL 16.2. The frontend production build passed. Migration head is 0003_advisory_check. The two-window CLI returned benefits 82, 78 and 71 for baseline, removal and dependency changes.
+Windows verification on 18 November 2026 recorded 140 tests passed in 28.55 seconds, with one test-client deprecation warning.
 
 The four-server demo uses the nine versioned inventory rows; omit the legacy asset for this demonstration. Five installations are affected, three have no matching advisory in the file and one is outside its affected range. With the cycle fixture, requests and urllib3 are blocked. At 30 minutes, manual estimates (15 minutes, 90 points) yield 180; the file estimates yield zero. At 36 minutes the file estimates yield 94.
 
