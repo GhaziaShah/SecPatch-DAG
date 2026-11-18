@@ -1,5 +1,10 @@
 # SecPatch-DAG QA Report
 
+## Current verification — 18 November 2026
+
+The current checkout passed 140 tests with PostgreSQL 16.2 and built the React production bundle. Migration head is 0003_advisory_check. Optimization compares Greedy, DP and CP-SAT. Maintenance study handles two windows. The graph order view lists cycle-blocked packages separately. The following dated entries document earlier milestones. See [README](README.md) and the [course report](docs/SecPatch-DAA-Report.pdf).
+
+
 Date: 2026-11-08
 Base commit: `23ec874` (Exclude generated TypeScript metadata)
 

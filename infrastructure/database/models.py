@@ -49,6 +49,7 @@ class Project(TimestampMixin, Base):
 
 class Environment(TimestampMixin, Base):
     __tablename__ = "environments"
+    advisory_check: Mapped[dict[str, Any] | None] = mapped_column(JSON_TYPE, nullable=True)
     id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=new_id)
     project_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)

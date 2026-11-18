@@ -212,6 +212,8 @@ class VulnerabilityImportRequest(BaseModel):
 
 
 class PersistedAnalysisRequest(BaseModel):
+    comparison_id: uuid.UUID | None = None
+    estimate_source: str | None = None
     project_id: uuid.UUID
     environment_id: uuid.UUID
     # One day. The DP table is (actions x window), so the dashboard path keeps
@@ -469,7 +471,8 @@ def list_environment_candidates_endpoint(environment_id: uuid.UUID) -> dict[str,
     from infrastructure.database.models import Asset, InstalledPackage, RemediationCandidate, Vulnerability
     from infrastructure.database.repositories import EnvironmentRepository
     with session_scope() as session:
-        if EnvironmentRepository().get(session, environment_id) is None:
+        environment = EnvironmentRepository().get(session, environment_id)
+        if environment is None:
             raise HTTPException(status_code=404, detail="Environment not found")
         rows = list(session.scalars(
             select(RemediationCandidate).join(InstalledPackage).join(Asset)
@@ -478,7 +481,7 @@ def list_environment_candidates_endpoint(environment_id: uuid.UUID) -> dict[str,
         ))
         details = [_candidate_detail(session, row) for row in rows]
         vulnerability_count = len({row.vulnerability_id for row in rows})
-        return {"vulnerabilities": vulnerability_count, "candidates": len(details), "candidate_details": details, "issues": []}
+        return {"vulnerabilities": vulnerability_count, "candidates": len(details), "candidate_details": details, "issues": [], **(environment.advisory_check or {})}
 
 
 @app.post("/api/v1/vulnerabilities/import")
@@ -493,7 +496,15 @@ def import_vulnerabilities_endpoint(request: VulnerabilityImportRequest) -> dict
             import_inventory(session, request.environment_id, inventory_records, lookup)
             candidates = persist_ingestion(session, result, lookup)
             candidate_details = [_candidate_detail(session, candidate) for candidate in candidates]
-            return {"vulnerabilities": len(result.vulnerabilities), "candidates": len(candidates), "candidate_details": candidate_details, "issues": result.issue_dicts()}
+            from infrastructure.database.models import Environment
+            environment = session.get(Environment, request.environment_id)
+            if environment is None:
+                raise HTTPException(status_code=404, detail="Environment not found")
+            report = {"vulnerabilities": len(result.vulnerabilities), "issues": result.issue_dicts(),
+                      "package_checks": list(result.package_checks)}
+            environment.advisory_check = report
+            session.commit()
+            return {**report, "candidates": len(candidates), "candidate_details": candidate_details}
     except (KeyError, TypeError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -502,7 +513,7 @@ def import_vulnerabilities_endpoint(request: VulnerabilityImportRequest) -> dict
 def create_persisted_plan_endpoint(request: PersistedAnalysisRequest) -> dict[str, Any]:
     try:
         with session_scope() as session:
-            return execute_persisted_analysis(session, request.project_id, request.environment_id, request.window_minutes, request.method, request.estimates)
+            return execute_persisted_analysis(session, request.project_id, request.environment_id, request.window_minutes, request.method, request.estimates, comparison_id=request.comparison_id, estimate_source=request.estimate_source)
     except (ValueError, TypeError, KeyError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
@@ -513,7 +524,19 @@ def create_persisted_plan_endpoint(request: PersistedAnalysisRequest) -> dict[st
 @app.get("/api/v1/projects/{project_id}/analysis-runs")
 def list_analysis_runs_endpoint(project_id: uuid.UUID, environment_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
     with session_scope() as session:
-        return [{"id": str(run.id), "status": run.status, "method": run.optimization_method, "solver_status": run.solver_status, "objective_value": run.objective_value, "created_at": run.created_at.isoformat()} for run in list_analyses(session, project_id, environment_id)]
+        summaries = []
+        for run in list_analyses(session, project_id, environment_id):
+            result = run.result_summary or {}
+            selected = result.get("optimization", {}).get("selected_actions")
+            summaries.append({
+                "comparison_id": result.get("comparison_id"), "estimate_source": result.get("estimate_source"),
+                "id": str(run.id), "status": run.status, "method": run.optimization_method,
+                "solver_status": run.solver_status, "objective_value": run.objective_value,
+                "created_at": run.created_at.isoformat(), "window_minutes": run.maintenance_window_minutes,
+                "selected_count": len(selected) if selected is not None else None,
+                "used_minutes": result.get("schedule", {}).get("total_duration_minutes"),
+            })
+        return summaries
 
 
 @app.get("/api/v1/analysis-runs/{run_id}")
@@ -549,3 +572,26 @@ def get_dataset(name: str) -> dict[str, Any]:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Dataset not found")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/v1/cep/experiment")
+def cep_experiment(first: int = 18, second: int = 13) -> dict[str, Any]:
+    from core.cep import experiment
+    try:
+        return experiment((first, second))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/maintenance-windows")
+def multiple_window_plan(run_id: uuid.UUID, first: int = 18, second: int = 13) -> dict[str, Any]:
+    from core.maintenance import MaintenancePlanner
+    with session_scope() as session:
+        try:
+            snapshot = get_analysis(session, run_id)["persistence"]["input_snapshot"]
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+    try:
+        return MaintenancePlanner().plan(Dataset.from_dict(snapshot), (first, second))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error

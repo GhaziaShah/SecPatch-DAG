@@ -62,13 +62,22 @@ def ingest_osv(
     inventory_by_package: dict[tuple[str, str], list[InstalledPackage]] = defaultdict(list)
     for installed in inventory:
         inventory_by_package[match_key(installed.package)].append(installed)
+    checks = {item: {"asset": item.asset_id, "package": item.package.name,
+                     "ecosystem": item.package.ecosystem, "version": item.version,
+                     "status": "no_match", "fixes": []} for item in inventory}
+    rank = {"no_match": 0, "unaffected": 1, "unknown": 2, "affected": 3}
     for vulnerability in vulnerabilities:
         installed_items = inventory_by_package.get(match_key(vulnerability.package), [])
         if not installed_items:
-            issues.append(IngestionIssue("package_not_in_inventory", f"{vulnerability.package.key} is not installed", vulnerability.source_record_id))
+            issues.append(IngestionIssue("package_not_in_inventory", f"{vulnerability.package.key} does not appear in the imported inventory.", vulnerability.source_record_id))
             continue
         for installed in installed_items:
             applicability, applicability_issues, fixed_version = _applicability(vulnerability, installed)
+            check = checks[installed]
+            if rank[applicability] > rank[check["status"]]:
+                check["status"] = applicability
+            if applicability == "affected" and fixed_version and fixed_version not in check["fixes"]:
+                check["fixes"].append(fixed_version)
             if applicability == "unaffected":
                 continue
             unresolved = list(applicability_issues)
@@ -92,10 +101,8 @@ def ingest_osv(
             previous = candidates_by_id.get(candidate.candidate_id)
             candidates_by_id[candidate.candidate_id] = candidate if previous is None else _merge_candidates(previous, candidate, issues)
     candidates = list(candidates_by_id.values())
-    if not dependencies and inventory:
-        issues.append(IngestionIssue("incomplete_dependency_metadata", "No package dependency metadata was supplied"))
     package_ids = tuple(sorted({installed.package.key for installed in inventory}))
-    return IngestionResult(tuple(vulnerabilities), inventory, tuple(candidates), tuple(issues), Dataset(package_ids, dependencies, ()))
+    return IngestionResult(tuple(vulnerabilities), inventory, tuple(candidates), tuple(issues), Dataset(package_ids, dependencies, ()), tuple(checks.values()))
 
 
 def approve_candidates(
@@ -128,7 +135,7 @@ def approve_candidates(
     except ValueError as error:
         issues.append(IngestionIssue("invalid_approved_dataset", str(error), severity="error"))
         approved = None
-    return IngestionResult(result.vulnerabilities, result.inventory, result.candidates, tuple(issues), approved)
+    return IngestionResult(result.vulnerabilities, result.inventory, result.candidates, tuple(issues), approved, result.package_checks)
 
 
 def _parse_inventory(payload: dict[str, Any], issues: list[IngestionIssue]) -> tuple[InstalledPackage, ...]:

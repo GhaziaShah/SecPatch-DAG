@@ -234,3 +234,15 @@ def test_multi_branch_ranges_pick_the_fix_for_the_installed_branch() -> None:
     assert by_asset["c2"].recommended_fixed_version == "4.0.0"
     approved = approve_candidates(result, {"c1:OSV-C": {"duration_minutes": 1, "benefit": 1}})
     assert [action.id for action in approved.approved_dataset.actions] == ["c1:OSV-C"]
+
+
+def test_coverage_counts_installations_including_unmatched_and_unaffected():
+    folder = ROOT / "diagnostic_datasets/datasets/baseline"
+    inventory = json.loads((folder / "inventory_offline.json").read_text())
+    rows = [row for row in inventory["packages"] if row["asset_id"] == "asset-api-prod"]
+    rows.append(dict(next(row for row in rows if row["name"] == "requests"), version="2.31.0"))
+    result = ingest_osv(json.loads((folder / "osv_offline.json").read_text()), {"packages": rows})
+    assert {(r["package"], r["version"], r["status"]) for r in result.package_checks} == {
+        ("requests", "2.27.0", "affected"), ("urllib3", "1.26.5", "affected"),
+        ("certifi", "2022.6.15", "no_match"), ("requests", "2.31.0", "unaffected")}
+    assert len(result.candidates) == 2

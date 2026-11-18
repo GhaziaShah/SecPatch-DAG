@@ -8,7 +8,7 @@ from typing import Any
 from .graph import analyze_graph, graph_contract
 from .models import MAX_WINDOW_MINUTES, Dataset
 from .optimization import comparison_report, cp_sat_optimize, dp_optimize, greedy_optimize
-from .scheduling import schedule_actions
+from .scheduling import ordered_actions, schedule_actions
 from .validation import validate_plan
 
 
@@ -33,8 +33,9 @@ def run_analysis(dataset: Dataset, window_minutes: int, method: str = "precedenc
         chosen = dp_optimize(actions, window_minutes, blocked_action_ids)
     else:
         chosen = cp_sat_optimize(actions, window_minutes, blocked_action_ids)
-    schedule, schedule_violations, schedule_trace = schedule_actions(actions, set(chosen.selected_ids), window_minutes, blocked_packages)
-    violations = validate_plan(actions, set(chosen.selected_ids), schedule, window_minutes, blocked_packages)
+    scheduling_inputs = ordered_actions(actions, chosen.selected_ids, graph.transitive_prerequisites)
+    schedule, schedule_violations, schedule_trace = schedule_actions(scheduling_inputs, set(chosen.selected_ids), window_minutes, blocked_packages)
+    violations = validate_plan(scheduling_inputs, set(chosen.selected_ids), schedule, window_minutes, blocked_packages)
     violations = sorted(set(violations + schedule_violations))
     input_fingerprint = hashlib.sha256(json.dumps({
         "packages": dataset.packages,
@@ -62,8 +63,10 @@ def run_analysis(dataset: Dataset, window_minutes: int, method: str = "precedenc
             "method": chosen.method,
             "solver_status": chosen.solver_status,
             "objective_value": chosen.objective_value,
-            "optimality_proven": chosen.optimality_proven,
-            "selected_actions": [actions[action_id].__dict__ for action_id in sorted(chosen.selected_ids)],
+            "optimality_proven": chosen.optimality_proven and not violations,
+            "half_bound_applies": not violations and not any(a.prerequisites or a.mandatory for a in actions.values())
+                                  and chosen.method == "precedence_greedy",
+            "selected_actions": [{k: v for k, v in vars(actions[action_id]).items() if k != "asset_id" or v} for action_id in sorted(chosen.selected_ids)],
             "deferred_actions": list(chosen.deferred_ids),
             "blocked_actions": sorted(blocked_action_ids),
             "total_duration_minutes": chosen.total_duration_minutes,

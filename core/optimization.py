@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from time import perf_counter
 from typing import Any
 
@@ -72,7 +73,7 @@ def greedy_optimize(
     stop at the first action k+1 that does not fit. The fractional-knapsack
     optimum takes the same prefix plus a fraction of action k+1, so
     OPT <= OPT_fractional <= greedy + b_(k+1) <= greedy + best_single, hence
-    max(greedy, best_single) >= OPT / 2. Runs in O(n log n) for the sort.
+    max(greedy, best_single) >= OPT / 2. Sorting costs O(n log n); repeated plan copies and sums can cost O(n²) even without edges.
     With prerequisites or mandatory actions it remains a heuristic.
     """
     _validate_optimizer_inputs(actions, window_minutes, blocked_action_ids)
@@ -119,8 +120,11 @@ def greedy_optimize(
             deferred.append(action.id)
             trace.append({"algorithm": "greedy", "event": "blocked", "action": action.id, "reason": "mandatory_window"})
 
+    if any(action.mandatory and action.id not in selected for action in actions.values()):
+        return _result("precedence_greedy", "INFEASIBLE", set(), actions, list(actions),
+                       (perf_counter() - started) * 1000, trace)
     forced = set(selected)  # mandatory actions and their prerequisites
-    ordered = sorted(actions.values(), key=lambda action: (-action.benefit / action.duration_minutes, -action.priority, action.id))
+    ordered = sorted(actions.values(), key=lambda action: (-Fraction(action.benefit, action.duration_minutes), -action.priority, action.id))
     for action in ordered:
         if action.id in selected or action.id in deferred:
             continue
