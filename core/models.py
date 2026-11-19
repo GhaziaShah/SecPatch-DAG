@@ -20,6 +20,7 @@ class PatchAction:
     prerequisites: tuple[str, ...] = ()
     risk: str = "medium"
     mandatory: bool = False
+    asset_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,8 @@ class Dataset:
             mandatory = item.get("mandatory", False)
             if not isinstance(mandatory, bool):
                 raise ValueError(f"Action {item['id']} mandatory must be true or false")
+            if not isinstance(item.get("asset_id", ""), str):
+                raise ValueError("asset_id must be a string")
             actions_list.append(PatchAction(
                 id=item["id"],
                 package_id=item["package_id"],
@@ -86,6 +89,7 @@ class Dataset:
                 prerequisites=tuple(prerequisites),
                 risk=str(item.get("risk", "medium")),
                 mandatory=mandatory,
+                asset_id=item.get("asset_id", ""),
             ))
         actions = tuple(actions_list)
         action_ids = {action.id for action in actions}

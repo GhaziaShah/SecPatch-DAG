@@ -93,6 +93,8 @@ class IngestionResult:
     issues: tuple[IngestionIssue, ...]
     approved_dataset: Dataset | None = None
 
+    package_checks: tuple[dict[str, Any], ...] = ()
+
     @property
     def supported_record_count(self) -> int:
         return len(self.vulnerabilities)
@@ -119,6 +121,7 @@ def candidate_to_action(candidate: RemediationCandidate, estimate: dict[str, Any
     return PatchAction(
         id=action_id,
         package_id=candidate.package.key,
+        asset_id=candidate.asset_id,
         duration_minutes=estimate["duration_minutes"],
         benefit=estimate["benefit"],
         priority=priority,

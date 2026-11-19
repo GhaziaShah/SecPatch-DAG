@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from time import perf_counter
 from typing import Any
 
@@ -72,91 +73,118 @@ def greedy_optimize(
     stop at the first action k+1 that does not fit. The fractional-knapsack
     optimum takes the same prefix plus a fraction of action k+1, so
     OPT <= OPT_fractional <= greedy + b_(k+1) <= greedy + best_single, hence
-    max(greedy, best_single) >= OPT / 2. Runs in O(n log n) for the sort.
+    max(greedy, best_single) >= OPT / 2.
     With prerequisites or mandatory actions it remains a heuristic.
+
+    Complexity: one O(n log n) sort, then a single pass. The plan's total
+    minutes and benefit are kept as running sums and membership uses sets, so
+    accepting or rejecting an action costs O(1 + c), where c is the number of
+    its prerequisites not yet in the plan. Without prerequisites the whole
+    algorithm is O(n log n); with h prerequisite links it is O(n log n + n*h)
+    in the worst case (a rejected action's chain may be walked again later).
     """
     _validate_optimizer_inputs(actions, window_minutes, blocked_action_ids)
     started = perf_counter()
     selected: set[str] = set()
+    used_minutes = 0
     deferred: list[str] = []
+    deferred_set: set[str] = set()
     trace: list[dict[str, object]] = []
 
-    def closure(action_id: str, candidate: set[str], visiting: set[str]) -> bool:
-        """Add action_id and its prerequisite closure to candidate.
+    def missing(action_id: str, base: set[str]) -> list[str] | None:
+        """Actions that must be added to ``base`` to take ``action_id``.
 
-        Iterative so that long prerequisite chains cannot hit Python's
-        recursion limit. Returns False (leaving candidate unchanged) if any
-        required action is unknown, blocked, or part of a cycle.
+        Returns the prerequisite closure of ``action_id`` minus what ``base``
+        already holds, or None if any required action is unknown or blocked.
+        Nothing is modified, so a rejected attempt needs no copy of the plan
+        (all-or-nothing). Iterative so long chains cannot hit the recursion
+        limit.
         """
-        if action_id in candidate:
-            return True
+        if action_id in base:
+            return []
         needed: list[str] = []
         seen: set[str] = set()
         work = [action_id]
         while work:
             current = work.pop()
-            if current in candidate or current in seen:
+            if current in base or current in seen:
                 continue
             if current not in actions or current in blocked_action_ids:
-                return False
+                return None
             seen.add(current)
             needed.append(current)
             work.extend(actions[current].prerequisites)
-        candidate.update(needed)
-        return True
+        return needed
+
+    def minutes(ids: list[str]) -> int:
+        return sum(actions[action_id].duration_minutes for action_id in ids)
+
+    def defer(action_id: str) -> None:
+        deferred.append(action_id)
+        deferred_set.add(action_id)
 
     for action in actions.values():
         if not action.mandatory:
             continue
-        candidate = set(selected)
-        if not closure(action.id, candidate, set()):
-            deferred.append(action.id)
+        needed = missing(action.id, selected)
+        if needed is None:
+            defer(action.id)
             trace.append({"algorithm": "greedy", "event": "blocked", "action": action.id, "reason": "cycle_or_prerequisite"})
-        elif sum(actions[action_id].duration_minutes for action_id in candidate) <= window_minutes:
-            selected = candidate
+        elif used_minutes + minutes(needed) <= window_minutes:
+            selected.update(needed)
+            used_minutes += minutes(needed)
             trace.append({"algorithm": "greedy", "event": "selected", "action": action.id, "reason": "mandatory"})
         else:
-            deferred.append(action.id)
+            defer(action.id)
             trace.append({"algorithm": "greedy", "event": "blocked", "action": action.id, "reason": "mandatory_window"})
 
+    if any(action.mandatory and action.id not in selected for action in actions.values()):
+        return _result("precedence_greedy", "INFEASIBLE", set(), actions, list(actions),
+                       (perf_counter() - started) * 1000, trace)
     forced = set(selected)  # mandatory actions and their prerequisites
-    ordered = sorted(actions.values(), key=lambda action: (-action.benefit / action.duration_minutes, -action.priority, action.id))
+    forced_minutes = used_minutes
+    ordered = sorted(actions.values(), key=lambda action: (-Fraction(action.benefit, action.duration_minutes), -action.priority, action.id))
     for action in ordered:
-        if action.id in selected or action.id in deferred:
+        if action.id in selected or action.id in deferred_set:
             continue
         if action.id in blocked_action_ids:
-            deferred.append(action.id)
+            defer(action.id)
             trace.append({"algorithm": "greedy", "event": "blocked", "action": action.id, "reason": "cyclic_scc"})
             continue
-        candidate = set(selected)
-        if closure(action.id, candidate, set()) and sum(actions[action_id].duration_minutes for action_id in candidate) <= window_minutes:
-            selected = candidate
+        needed = missing(action.id, selected)
+        if needed is not None and used_minutes + minutes(needed) <= window_minutes:
+            selected.update(needed)
+            used_minutes += minutes(needed)
             trace.append({"algorithm": "greedy", "event": "selected", "action": action.id})
         else:
-            deferred.append(action.id)
+            defer(action.id)
             trace.append({"algorithm": "greedy", "event": "deferred", "action": action.id, "reason": "window_or_prerequisite"})
 
     # Approximation step: compare with the best single action (plus whatever
     # it requires) that fits; keep whichever plan is worth more.
-    def value(plan: set[str]) -> int:
-        return sum(actions[action_id].benefit for action_id in plan)
+    def value(ids) -> int:
+        return sum(actions[action_id].benefit for action_id in ids)
 
-    best_single: set[str] | None = None
+    forced_value = value(forced)
+    selected_value = value(selected)
+    best_extra: list[str] | None = None
+    best_value = 0
     for action_id in sorted(actions):
         if action_id in forced or action_id in blocked_action_ids:
             continue
-        candidate = set(forced)
-        if closure(action_id, candidate, set()) and sum(actions[item].duration_minutes for item in candidate) <= window_minutes:
-            if best_single is None or value(candidate) > value(best_single):
-                best_single = candidate
-    if best_single is not None and value(best_single) > value(selected):
+        needed = missing(action_id, forced)
+        if needed is not None and forced_minutes + minutes(needed) <= window_minutes:
+            candidate_value = forced_value + value(needed)
+            if best_extra is None or candidate_value > best_value:
+                best_extra, best_value = needed, candidate_value
+    if best_extra is not None and best_value > selected_value:
         trace.append({"algorithm": "greedy", "event": "approximation_swap",
-                      "greedy_value": value(selected), "best_single_value": value(best_single)})
-        selected = best_single
+                      "greedy_value": selected_value, "best_single_value": best_value})
+        selected = forced | set(best_extra)
         deferred = [action_id for action_id in actions if action_id not in selected]
     else:
-        trace.append({"algorithm": "greedy", "event": "approximation_check", "greedy_value": value(selected),
-                      "best_single_value": value(best_single) if best_single is not None else 0, "kept": "greedy"})
+        trace.append({"algorithm": "greedy", "event": "approximation_check", "greedy_value": selected_value,
+                      "best_single_value": best_value if best_extra is not None else 0, "kept": "greedy"})
     return _result("precedence_greedy", "FEASIBLE", selected, actions, deferred, (perf_counter() - started) * 1000, trace)
 
 

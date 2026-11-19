@@ -387,7 +387,7 @@ def environment_graph(session: Session, environment_id: uuid.UUID) -> dict[str, 
     return {"graph": result["graph"], "trace": result.get("trace", []), "statistics": result["statistics"]}
 
 
-def execute_persisted_analysis(session: Session, project_id: uuid.UUID, environment_id: uuid.UUID, window_minutes: int, method: str, estimates: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def execute_persisted_analysis(session: Session, project_id: uuid.UUID, environment_id: uuid.UUID, window_minutes: int, method: str, estimates: dict[str, dict[str, Any]], *, comparison_id: uuid.UUID | None = None, estimate_source: str | None = None) -> dict[str, Any]:
     """Build planning inputs only from persisted inventory and explicit estimates."""
     environment = environments.get(session, environment_id)
     if environment is None or environment.project_id != project_id:
@@ -455,6 +455,9 @@ def execute_persisted_analysis(session: Session, project_id: uuid.UUID, environm
         "actions": [{**action.__dict__, "prerequisites": list(action.prerequisites)} for action in actions],
     })
     result = run_analysis(dataset, window_minutes, method)
+    if comparison_id is not None:
+        result["comparison_id"] = str(comparison_id)
+        result["estimate_source"] = estimate_source
     result["estimate_review"] = estimate_review
     persist_analysis(session, result, dataset, project_id, environment_id)
     return result

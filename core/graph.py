@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -31,6 +32,11 @@ def analyze_graph(nodes: tuple[str, ...], dependencies: tuple[tuple[str, str], .
 
     SCC detection is direction-independent, while execution order is returned
     with prerequisites before dependents.
+
+    Complexity: Tarjan O(V + E); Kahn on the condensation with a min-heap
+    O(V + E + V log V); blocked nodes O(V + E); adjacency sorting O(E log E).
+    The per-node transitive closures are output-bound: O(V + E + R log V),
+    where R is the total number of closure entries returned (up to V^2).
     """
     adjacency = {node: [] for node in nodes}
     for source, target in dependencies:
@@ -116,22 +122,25 @@ def analyze_graph(nodes: tuple[str, ...], dependencies: tuple[tuple[str, str], .
 
     # Stored edges point from a dependent to its prerequisite. Reverse them
     # for prerequisite-first Kahn ordering.
+    # Kahn's algorithm on the condensation. A binary heap always releases the
+    # smallest ready component id, the same deterministic order as keeping a
+    # sorted list, but in O(log C) per step instead of O(C log C).
     indegree = {position: 0 for position in range(len(components))}
     component_adjacency = {position: [] for position in range(len(components))}
     for source, target in sorted(condensation):
         component_adjacency[target].append(source)
         indegree[source] += 1
-    ready = sorted(position for position, degree in indegree.items() if degree == 0)
+    ready = [position for position, degree in indegree.items() if degree == 0]
+    heapq.heapify(ready)
     component_order: list[int] = []
     while ready:
-        current = ready.pop(0)
+        current = heapq.heappop(ready)
         component_order.append(current)
         trace.append({"algorithm": "topological_sort", "event": "process", "component": f"component-{current}"})
         for neighbor in component_adjacency[current]:
             indegree[neighbor] -= 1
             if indegree[neighbor] == 0:
-                ready.append(neighbor)
-                ready.sort()
+                heapq.heappush(ready, neighbor)
                 trace.append({"algorithm": "topological_sort", "event": "ready", "component": f"component-{neighbor}"})
     if len(component_order) != len(components):
         raise ValueError("Condensation graph is not acyclic")
@@ -142,20 +151,51 @@ def analyze_graph(nodes: tuple[str, ...], dependencies: tuple[tuple[str, str], .
     for values in reverse.values():
         values.sort()
     direct_prerequisites = {node: sorted(adjacency[node]) for node in nodes}
-    transitive_prerequisites = {
-        node: sorted(_traverse(node, adjacency)) for node in nodes
-    }
-    dependents = {node: sorted(_traverse(node, reverse)) for node in nodes}
+
+    # Reachability per node, computed once per component on the condensation
+    # (dynamic programming over the DAG) instead of one search per node.
+    # Tarjan finishes a component only after every component it reaches, so
+    # successors always have smaller ids. A node reaches every member of its
+    # own component exactly when that component is cyclic.
+    cyclic_ids = {component_of[component[0]] for component in cyclic_components}
+    successors: list[list[int]] = [[] for _ in components]
+    predecessors: list[list[int]] = [[] for _ in components]
+    for source, target in condensation:
+        successors[source].append(target)
+        predecessors[target].append(source)
+    reaches: list[set[str]] = [set() for _ in components]
+    for position in range(len(components)):
+        for successor in successors[position]:
+            reaches[position] |= reaches[successor]
+            reaches[position].update(components[successor])
+    reached_by: list[set[str]] = [set() for _ in components]
+    for position in reversed(range(len(components))):
+        for predecessor in predecessors[position]:
+            reached_by[position] |= reached_by[predecessor]
+            reached_by[position].update(components[predecessor])
+
+    def closure(table: list[set[str]], node: str) -> list[str]:
+        position = component_of[node]
+        found = table[position] | set(components[position]) if position in cyclic_ids else table[position]
+        return sorted(found)
+
+    transitive_prerequisites = {node: closure(reaches, node) for node in nodes}
+    dependents = {node: closure(reached_by, node) for node in nodes}
     depth = {node: 0 for node in nodes}
     for node in topological_order:
         if adjacency[node]:
             depth[node] = max(depth[prerequisite] + 1 for prerequisite in adjacency[node])
-    blocked_nodes = sorted({
-        node
-        for component in cyclic_components
-        for cyclic_node in component
-        for node in [cyclic_node, *dependents[cyclic_node]]
-    })
+
+    # Blocked = cyclic nodes plus everything that depends on them: one
+    # multi-source search over the reversed edges, O(V + E).
+    blocked: set[str] = {node for component in cyclic_components for node in component}
+    queue: deque[str] = deque(blocked)
+    while queue:
+        for dependent in reverse[queue.popleft()]:
+            if dependent not in blocked:
+                blocked.add(dependent)
+                queue.append(dependent)
+    blocked_nodes = sorted(blocked)
     return GraphAnalysis(
         nodes=list(nodes),
         edges=[{"from": source, "to": target} for source, target in dependencies],
@@ -240,13 +280,15 @@ def _validated_adjacency(nodes: tuple[str, ...], dependencies: tuple[tuple[str, 
 def graph_contract(analysis: GraphAnalysis) -> dict[str, object]:
     """Build a frontend-independent graph JSON contract."""
     cyclic_ids = {f"component-{analysis.component_of[node]}" for component in analysis.cyclic_components for node in component}
+    blocked = set(analysis.blocked_nodes)  # set lookups keep the contract O(V + E + output)
+    cyclic = {tuple(component) for component in analysis.cyclic_components}
     nodes = [
         {
             "id": node,
             "type": "package",
             "component_id": analysis.component_ids[node],
             "is_cyclic": analysis.component_ids[node] in cyclic_ids,
-            "is_blocked": node in analysis.blocked_nodes,
+            "is_blocked": node in blocked,
             "dependency_depth": analysis.depth[node],
             "direct_prerequisites": analysis.direct_prerequisites[node],
             "transitive_prerequisites": analysis.transitive_prerequisites[node],
@@ -265,9 +307,9 @@ def graph_contract(analysis: GraphAnalysis) -> dict[str, object]:
             {
                 "id": f"component-{index}",
                 "nodes": component,
-                "is_cyclic": component in analysis.cyclic_components,
-                "is_blocked": any(node in analysis.blocked_nodes for node in component),
-                "explanation": "Cycle requires resolution before affected packages can be planned." if component in analysis.cyclic_components else None,
+                "is_cyclic": tuple(component) in cyclic,
+                "is_blocked": any(node in blocked for node in component),
+                "explanation": "Cycle requires resolution before affected packages can be planned." if tuple(component) in cyclic else None,
             }
             for index, component in enumerate(analysis.components)
         ],
